@@ -4,6 +4,7 @@
 
 const express = require('express');
 const handler = require('../data-handler');
+const { corsMiddleware } = require('./cors');
 const { registerHealth } = require('./routes/health');
 const { registerServers } = require('./routes/servers');
 const { registerLive } = require('./routes/live');
@@ -13,6 +14,7 @@ const { registerCache } = require('./routes/cache');
 
 function createApi(cfg) {
   const app = express();
+  app.use(corsMiddleware);
   app.use(express.json());
   app.disable('x-powered-by');
 
