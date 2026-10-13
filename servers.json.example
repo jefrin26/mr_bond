@@ -1,0 +1,22 @@
+{
+  "pollIntervalSec": 30,
+  "sshTimeoutMs": 10000,
+  "historyMaxPoints": 1000,
+  "historyMaxDays": 7,
+  "servers": [
+    {
+      "id": "web1",
+      "host": "192.168.1.10",
+      "port": 22,
+      "enabled": true,
+      "auth": { "type": "password", "usernameEnv": "WEB1_USER", "passwordEnv": "WEB1_PASS" }
+    },
+    {
+      "id": "db1",
+      "host": "192.168.1.11",
+      "port": 22,
+      "enabled": true,
+      "auth": { "type": "key", "usernameEnv": "DB1_USER", "privateKeyPath": "~/.ssh/id_rsa", "passphraseEnv": "DB1_PASSPHRASE" }
+    }
+  ]
+}

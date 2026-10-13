@@ -1,0 +1,8 @@
+{
+  "rules": [
+    { "id": "cpu-high", "serverId": "*", "metric": "cpu.usagePct", "operator": ">", "threshold": 90, "forConsecutive": 3 },
+    { "id": "mem-high", "serverId": "*", "metric": "mem.usagePct", "operator": ">", "threshold": 90, "forConsecutive": 3 },
+    { "id": "disk-high", "serverId": "*", "metric": "disk.usagePct", "operator": ">", "threshold": 85, "forConsecutive": 2 },
+    { "id": "load-high", "serverId": "*", "metric": "cpu.load1", "operator": ">", "threshold": 4, "forConsecutive": 3 }
+  ]
+}
