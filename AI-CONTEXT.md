@@ -55,6 +55,7 @@ src/data-handler/serverHandler.js  findServer(), listServers() (public+live join
 src/data-handler/monitorHandler.js pollOne/pollAll/getLive/getHistory/clear*/startScheduler
 src/data-handler/alertHandler.js   evaluateSample/recordHostDown/list/clear/defaultRules
 src/presenter/app.js             createApi() — wires route modules
+src/presenter/cors.js            corsMiddleware() — no-dep CORS, OPTIONS → 204
 src/presenter/routes/health|servers|live|history|alerts|cache.js  one group per file
 ```
 
@@ -94,6 +95,10 @@ Rule: `{ id, serverId:'*'|<id>, metric:'cpu.usagePct'|..., operator:'>'|'>='|'<'
 9. **Error codes from `monitorHandler.pollOne`**: `UNKNOWN_SERVER` → 404, `HOST_DOWN` (carries `.down`) → 502.
    Presenter maps these; keep the contract.
 10. **Port comes only from `process.env.PORT`** (default 3000), not servers.json.
+11. **CORS is on by default** (`src/presenter/cors.js`, no extra dep — do NOT add `cors`
+    package). `corsMiddleware` runs before `express.json()`, sets
+    `Allow-Origin/Methods/Headers`, handles `OPTIONS → 204`. Origin from
+    `process.env.CORS_ORIGIN` (default `*`). Flutter web needs this.
 
 ## 5. How to extend (follow existing patterns)
 
@@ -126,6 +131,8 @@ curl -s -X DELETE localhost:3456/api/cache
   `alertHandler.evaluateSample` twice (consecutive), read via `monitorHandler.getLive`.
 - SSH failure test: `pollServer({id,host:'192.168.1.10',...}, 1500)` → `ok:false` (EHOSTUNREACH),
   never throws. Down hosts appear in `/api/servers[].last.status === 'down'` + `/api/alerts` as `host-down`.
+- CORS: `curl -si -H "Origin: http://localhost:8080" localhost:3456/healthz | head -n 10`
+  must show `Access-Control-Allow-Origin`; `curl -si -X OPTIONS localhost:3456/api/servers` → `204`.
 - Syntax: `for f in $(find src -name '*.js'); do node --check "$f"; done`
 - Layer check: `grep -rn '\.\./data' src/presenter/` must show only `../data-handler`;
   `grep -rn 'require(.fs.)\|ssh2\|express' src/data-handler/` must show nothing (comments excepted).
