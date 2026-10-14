@@ -7,9 +7,9 @@
 
 Agentless SSH server monitor. Node 18+ (CommonJS, `node src/index.js`).
 Linux targets only, API-only (no UI). Polls over SSH (`ssh2`), stores
-snapshots as JSON files under `db/`, serves REST via Express 4.
+snapshots as JSON files under `db/`, exposes live data via WebSocket (`ws`, WS-only).
 
-- Deps: `dotenv`, `express@4`, `ssh2`. Nothing else.
+- Deps: `dotenv`, `ws@8`, `ssh2`. Nothing else.
 - Entry: `src/index.js` (thin bootstrap only).
 - PM2: `ecosystem.config.js` (`instances: 1`, `fork` — do NOT change to cluster).
 
@@ -18,16 +18,16 @@ snapshots as JSON files under `db/`, serves REST via Express 4.
 ```
 src/data/          fetch/load/persist ONLY (ssh, fs, config, parsers)
 src/data-handler/  processes ONLY via ../data (poll orchestration, alerts, joins)
-src/presenter/     expose ONLY via ../data-handler (express routes)
+src/presenter/     expose ONLY via data-handler (ws server, no static on wire)
 src/index.js       bootstrap wiring the three (only place that touches all)
 ```
 
 Layer rules (enforced by grep in reviews):
 
-- `src/presenter/**` may `require('../data-handler')` — **never** `require('../data')`,
+- `src/presenter/**` may `require('../../data-handler')` (from `ws/` subdir) — **never** `require('../data')` / `require('../../data')`,
   never `fs`/`ssh2` directly.
 - `src/data-handler/**` may `require('../data')` + siblings — **never** `fs`,
-  `ssh2`, `express`, or `db/` paths directly.
+  `ssh2`, `ws`, or `db/` paths directly.
 - `src/data/store/jsonFiles.js` is the ONLY module allowed to touch `fs` for `db/`.
 - `src/data/sshClient.js` is the ONLY module allowed to use `ssh2`.
 - `src/data/appConfig.js` is the ONLY module allowed to read `.env`/`servers.json`/`alerts.json`.
@@ -37,7 +37,7 @@ Barrels:
 - `src/data/index.js` → `{ appConfig, sshClient, linux, store }`
 - `src/data/store/index.js` → `{ jsonFiles, liveFiles, historyFiles, alertFiles }`
 - `src/data-handler/index.js` → `{ serverHandler, monitorHandler, alertHandler }`
-- `src/presenter/index.js` → `{ createApi }`
+- `src/presenter/index.js` → `{ createWsApi }`
 
 ### File map
 
@@ -54,9 +54,10 @@ src/data/store/alertFiles.js     db/alerts/<id>.json
 src/data-handler/serverHandler.js  findServer(), listServers() (public+live join)
 src/data-handler/monitorHandler.js pollOne/pollAll/getLive/getHistory/clear*/startScheduler
 src/data-handler/alertHandler.js   evaluateSample/recordHostDown/list/clear/defaultRules
-src/presenter/app.js             createApi() — wires route modules
-src/presenter/cors.js            corsMiddleware() — no-dep CORS, OPTIONS → 204
-src/presenter/routes/health|servers|live|history|alerts|cache.js  one group per file
+src/presenter/ws/wsServer.js   createWsApi() — WSS + broadcast(), Origin check
+src/presenter/ws/protocol.js   pure builders — toLivePayload() strips static, welcome/pong/error/history/alerts
+src/presenter/ws/subscriptions.js  per-socket id filter (null = all)
+src/presenter/ws/handlers.js   subscribe/unsubscribe/poll/get_live/get_history/get_alerts/ping via handler only
 ```
 
 ## 3. Data shapes
@@ -78,7 +79,7 @@ Rule: `{ id, serverId:'*'|<id>, metric:'cpu.usagePct'|..., operator:'>'|'>='|'<'
 2. **First poll has `cpu.usagePct === null` and `net.rates === null`** — deltas need `prevState`
    (`Map serverId → { cpu, net, ts }`). Don't treat null as 0. `clearLive` also clears prevState.
 3. **History is written ONLY on ok samples.** Down samples go to live + alerts, never history.
-   So `GET /api/history` 404 (`{ error:'no history...' }`) after only-down polls is correct.
+   So `get_history` `{ error:'no history...' }` after only-down polls is correct.
 4. **Alerts need consecutive breaches** (`forConsecutive`, `strikes` Map in alertHandler).
    Single breach does NOT fire. Tests must call `evaluateSample` N times. `host-down` fires immediately.
 5. **Config precedence: `servers.json` wins over `.env`** for
@@ -92,13 +93,14 @@ Rule: `{ id, serverId:'*'|<id>, metric:'cpu.usagePct'|..., operator:'>'|'>='|'<'
    (no file locks by design). Scheduler has a `running` guard + `Math.max(5, interval)` floor.
 8. **SSH command is one exec** (`buildCommand()` joined by `;`, split by `__MON_SEP_*` sentinels).
    Don't add per-metric round trips. `df` excludes `tmpfs/devtmpfs/overlay`.
-9. **Error codes from `monitorHandler.pollOne`**: `UNKNOWN_SERVER` → 404, `HOST_DOWN` (carries `.down`) → 502.
-   Presenter maps these; keep the contract.
+9. **Error codes from `monitorHandler.pollOne`**: `UNKNOWN_SERVER` and `HOST_DOWN`
+   (carries `.down`) are mapped by `ws/handlers.js` to `{ type:'error' }` or a
+   minimal `live` down payload. `db/` files keep full samples; the wire never does.
 10. **Port comes only from `process.env.PORT`** (default 3000), not servers.json.
-11. **CORS is on by default** (`src/presenter/cors.js`, no extra dep — do NOT add `cors`
-    package). `corsMiddleware` runs before `express.json()`, sets
-    `Allow-Origin/Methods/Headers`, handles `OPTIONS → 204`. Origin from
-    `process.env.CORS_ORIGIN` (default `*`). Flutter web needs this.
+11. **WS carries NO static inventory** (`protocol.toLivePayload()` strips `host`,
+    `target/source/size`, `durationMs`, `message` text). Wire key is `id` only;
+    the client holds name/ip statically. Origin check mirrors old CORS:
+    `process.env.CORS_ORIGIN` (default `*`); non-browser clients send no Origin.
 
 ## 5. How to extend (follow existing patterns)
 
@@ -107,8 +109,9 @@ Rule: `{ id, serverId:'*'|<id>, metric:'cpu.usagePct'|..., operator:'>'|'>='|'<'
   unless thresholds use it.
 - **New alert rule**: add to `alerts.json` (copy `alerts.json.example`). Metric path uses
   dot notation via `getByPath` (e.g. `cpu.usagePct`). `serverId:'*'` = all hosts.
-- **New endpoint**: create `src/presenter/routes/<x>.js` exporting `register<X>(app, { cfg, handler })`
-  using ONLY `handler.*`, then call it from `presenter/app.js`. Never import `../data` in presenter.
+- **New WS message**: add a `case` in `src/presenter/ws/handlers.js`
+  using ONLY `handler.*`, plus a pure builder in `ws/protocol.js`.
+  Never import `../data` in presenter. Never put static (host/ip/target/message) on the wire.
 - **New processing**: add function in `src/data-handler/*Handler.js` using ONLY `data.*`.
   Add unit-testable pure logic there, keep I/O in `data/`.
 
@@ -119,28 +122,26 @@ cp servers.json.example servers.json; cp .env.example .env; cp alerts.json.examp
 npm install
 node -e "require('./src/data').appConfig.loadConfig()"   # fails fast with helpful msg if misconfigured
 PORT=3456 timeout 8 node src/index.js & sleep 3
-curl -s localhost:3456/healthz
-curl -s localhost:3456/api/servers | head -c 400
-curl -s localhost:3456/api/alerts/rules | head -c 200
-curl -s -X DELETE localhost:3456/api/cache
+node -e "const W=require('ws');const s=new W('ws://localhost:3456');s.on('message',m=>{console.log(String(m).slice(0,200));if(JSON.parse(m).type==='welcome'){s.send(JSON.stringify({type:'subscribe'}))}});setTimeout(()=>s.close(),5000)"
 ```
+
+- Live static-leak check: every `live` msg must have NO `host/servers/serverId` keys
+  (`id` only). See ENDPOINTS.md protocol.
 
 - Parsers: `require('./src/data/linux/memParser')` etc. directly with fixture strings (see past
   verification: mem 62.5%, df 80%, net rx/tx, uptime loads).
 - Handler flow without SSH: write fake sample via `data.store.liveFiles`, evaluate via
   `alertHandler.evaluateSample` twice (consecutive), read via `monitorHandler.getLive`.
 - SSH failure test: `pollServer({id,host:'192.168.1.10',...}, 1500)` → `ok:false` (EHOSTUNREACH),
-  never throws. Down hosts appear in `/api/servers[].last.status === 'down'` + `/api/alerts` as `host-down`.
-- CORS: `curl -si -H "Origin: http://localhost:8080" localhost:3456/healthz | head -n 10`
-  must show `Access-Control-Allow-Origin`; `curl -si -X OPTIONS localhost:3456/api/servers` → `204`.
+  never throws. Down hosts arrive as `{ type:'live', status:'down' }` + `alerts` as `host-down`.
 - Syntax: `for f in $(find src -name '*.js'); do node --check "$f"; done`
-- Layer check: `grep -rn '\.\./data' src/presenter/` must show only `../data-handler`;
-  `grep -rn 'require(.fs.)\|ssh2\|express' src/data-handler/` must show nothing (comments excepted).
+- Layer check: `grep -rn '\.\./data' src/presenter/` must show only `data-handler`;
+  `grep -rn 'require(.fs.)\|ssh2\|express' src/data-handler/ src/presenter/` must show nothing (comments excepted).
 - Cleanup after tests: `rm -rf db/live/*.json db/history/* db/alerts/*.json`.
 
 ## 7. Conventions
 
 CommonJS + `'use strict'`, 2-space indent, no TypeScript/build step. `dotenv.config()` runs in
-`appConfig.js` on require. Express 4 (`express.json()`, `x-powered-by` disabled). Keep modules
+`appConfig.js` on require. WS via `ws@8` (`WebSocketServer`, JSON messages, `ping→pong`). Keep modules
 small/single-purpose — "highly modular" is a requirement, don't merge files. Don't create docs
 unless asked (this file is the exception).

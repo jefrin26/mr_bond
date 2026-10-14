@@ -2,6 +2,6 @@
 
 // PRESENTER barrel — what bootstrap uses to expose things.
 
-const { createApi } = require('./app');
+const { createWsApi } = require('./ws/wsServer');
 
-module.exports = { createApi };
+module.exports = { createWsApi };

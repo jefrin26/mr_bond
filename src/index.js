@@ -12,16 +12,16 @@ function main() {
   data.store.jsonFiles.ensureDir(`${cfg.dbDir}/history`);
   data.store.jsonFiles.ensureDir(`${cfg.dbDir}/alerts`);
 
-  const scheduler = handler.monitorHandler.startScheduler(cfg);
-  const app = presenter.createApi(cfg);
-  const server = app.listen(cfg.port, () => {
-    console.log(`monitor API listening on :${cfg.port} (poll every ${cfg.pollIntervalSec}s, ${cfg.servers.length} server(s))`);
+  const api = presenter.createWsApi(cfg);
+  console.log(`monitor WS listening on :${cfg.port} (poll every ${cfg.pollIntervalSec}s, ${cfg.servers.length} server(s))`);
+  const scheduler = handler.monitorHandler.startScheduler(cfg, {
+    onTick: (outcomes) => api.broadcast(outcomes),
   });
 
   const shutdown = () => {
     console.log('\nshutting down...');
     try { scheduler.stop(); } catch { /* noop */ }
-    server.close(() => process.exit(0));
+    try { api.close(() => process.exit(0)); } catch { process.exit(0); }
     setTimeout(() => process.exit(0), 3000).unref();
   };
   process.on('SIGINT', shutdown);
